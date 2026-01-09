@@ -10,7 +10,7 @@ const Home = () => {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
 
-  const BACKEND_URL = 'http://localhost:5000';
+  const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
 
   const handleFileSelect = (event) => {
     const file = event.target.files[0];
