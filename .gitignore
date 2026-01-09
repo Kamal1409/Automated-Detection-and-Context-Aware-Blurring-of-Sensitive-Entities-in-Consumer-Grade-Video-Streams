@@ -196,3 +196,4 @@ Thumbs.db
 *.flv
 *.webm
 *.mkv
+./venv
