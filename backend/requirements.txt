@@ -4,6 +4,9 @@ werkzeug
 opencv-python
 pillow
 ffmpeg-python
+ultralytics
+easyocr
+
 numpy
 nudenet
 imageio-ffmpeg
