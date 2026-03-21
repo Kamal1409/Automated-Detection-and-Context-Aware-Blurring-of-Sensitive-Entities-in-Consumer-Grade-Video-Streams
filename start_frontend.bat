@@ -5,7 +5,7 @@ cd frontend
 echo Installing Node.js dependencies...
 call npm install
 
-echo Starting React development server...
-call npm start
+echo Starting Vite development server...
+call npm run dev
 
 pause

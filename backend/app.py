@@ -1,283 +1,322 @@
-from flask import Flask, request, jsonify, send_file, send_from_directory
-from flask_cors import CORS
-from werkzeug.utils import secure_filename
-import os
-import uuid
-import shutil
-import cv2
 import json
-from datetime import datetime, timedelta
-import mimetypes
+import os
 import threading
 import time
+import uuid
+from datetime import datetime
+
+from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+
+from job_manager import JobManager
+from face_candidates import extract_face_candidates
+from media_utils import allowed_file, cleanup_expired_files, get_video_info
+from options import normalize_options
+from settings import (
+    MAX_FILE_SIZE,
+    PROCESSED_FOLDER,
+    TEMP_FILE_EXPIRY_HOURS,
+    TRUSTED_FOLDER,
+    UPLOAD_FOLDER,
+    ensure_directories,
+)
+from video_processing import process_video
+
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all domains
+CORS(app)
+ensure_directories()
 
-# Configuration
-UPLOAD_FOLDER = 'temp_storage'
-PROCESSED_FOLDER = 'processed_videos'
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
-ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'}
-TEMP_FILE_EXPIRY_HOURS = 24  # Files will be deleted after 24 hours
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
-# Create directories if they don't exist
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(PROCESSED_FOLDER, exist_ok=True)
+job_manager = JobManager(max_workers=2)
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 
-def allowed_file(filename):
-    """Check if the uploaded file has an allowed extension"""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def _parse_options_payload():
+    options_json = request.form.get("options")
+    if not options_json:
+        return normalize_options({})
 
-def get_video_info(video_path):
-    """Extract video information using OpenCV"""
     try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return None
-        
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration = frame_count / fps if fps > 0 else 0
-        
-        cap.release()
-        
-        return {
-            'width': width,
-            'height': height,
-            'fps': round(fps, 2),
-            'duration': round(duration, 2),
-            'frame_count': int(frame_count)
+        raw_options = json.loads(options_json)
+    except json.JSONDecodeError as ex:
+        raise ValueError(f"Invalid options payload: {ex}") from ex
+    return normalize_options(raw_options)
+
+
+def _save_trusted_faces(job_id):
+    trusted_paths = []
+    trusted_files = request.files.getlist("trusted_faces")
+    if not trusted_files:
+        return trusted_paths
+
+    trusted_job_dir = os.path.join(TRUSTED_FOLDER, job_id)
+    os.makedirs(trusted_job_dir, exist_ok=True)
+
+    for trusted_file in trusted_files:
+        if trusted_file.filename == "":
+            continue
+        safe_name = secure_filename(trusted_file.filename)
+        file_path = os.path.join(trusted_job_dir, safe_name)
+        trusted_file.save(file_path)
+        trusted_paths.append(file_path)
+
+    return trusted_paths
+
+
+def _run_processing_job(
+    job_id, input_path, output_path, original_name, output_name, options, trusted_paths
+):
+    job_manager.update(
+        job_id,
+        status="running",
+        phase="initializing",
+        progress=1.0,
+        message="Preparing processing pipeline",
+        started_at=datetime.now().isoformat(),
+    )
+
+    def on_progress(progress, message, phase):
+        job_manager.update(
+            job_id,
+            status="running" if progress < 100 else "completed",
+            phase=phase,
+            progress=round(float(progress), 1),
+            message=message,
+        )
+
+    try:
+        report = process_video(
+            input_path=input_path,
+            output_path=output_path,
+            options=options,
+            trusted_face_paths=trusted_paths,
+            progress_callback=on_progress,
+        )
+
+        result = {
+            "message": "Video processed successfully",
+            "job_id": job_id,
+            "original_filename": original_name,
+            "output_filename": output_name,
+            "upload_time": datetime.now().isoformat(),
+            "video_info": get_video_info(input_path),
+            "effective_options": options,
+            "report": report,
+            "processed_video_url": f"/stream-processed/{output_name}",
+            "download_video_url": f"/download-processed/{output_name}",
         }
-    except Exception as e:
-        print(f"Error extracting video info: {str(e)}")
-        return None
+        job_manager.complete(job_id, result)
+    except Exception as ex:
+        job_manager.fail(job_id, f"Processing failed: {ex}")
 
-def process_video_preview(video_path, output_path):
-    """
-    Process video to generate a preview (example: extract first 10 seconds)
-    This is where you would implement your specific video processing logic
-    """
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return False
-        
-        # Get video properties
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Create video writer for preview (first 10 seconds)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        frame_count = 0
-        max_frames = int(fps * 10)  # 10 seconds preview
-        
-        while frame_count < max_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Add processing effects here (example: add timestamp)
-            timestamp = f"Frame: {frame_count}"
-            cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            out.write(frame)
-            frame_count += 1
-        
-        cap.release()
-        out.release()
-        return True
-    except Exception as e:
-        print(f"Error processing video: {str(e)}")
-        return False
 
-def cleanup_temp_files():
-    """Clean up temporary files older than TEMP_FILE_EXPIRY_HOURS"""
-    try:
-        current_time = datetime.now()
-        for folder in [UPLOAD_FOLDER, PROCESSED_FOLDER]:
-            for filename in os.listdir(folder):
-                filepath = os.path.join(folder, filename)
-                if os.path.isfile(filepath):
-                    file_modified = datetime.fromtimestamp(os.path.getmtime(filepath))
-                    if current_time - file_modified > timedelta(hours=TEMP_FILE_EXPIRY_HOURS):
-                        os.remove(filepath)
-                        print(f"Deleted expired file: {filepath}")
-    except Exception as e:
-        print(f"Error during cleanup: {str(e)}")
-
-def start_cleanup_scheduler():
-    """Start a background thread for periodic cleanup"""
-    def cleanup_scheduler():
+def _start_cleanup_scheduler():
+    def cleanup_loop():
         while True:
-            time.sleep(3600)  # Run every hour
-            cleanup_temp_files()
-    
-    cleanup_thread = threading.Thread(target=cleanup_scheduler, daemon=True)
-    cleanup_thread.start()
+            time.sleep(3600)
+            try:
+                cleanup_expired_files(
+                    [UPLOAD_FOLDER, PROCESSED_FOLDER], TEMP_FILE_EXPIRY_HOURS
+                )
+            except Exception as ex:
+                print(f"Cleanup error: {ex}")
 
-@app.route('/health', methods=['GET'])
+    thread = threading.Thread(target=cleanup_loop, daemon=True)
+    thread.start()
+
+
+@app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
-@app.route('/upload-video', methods=['POST'])
-def upload_video():
-    """Handle video upload and processing"""
+
+@app.route("/process-video", methods=["POST"])
+@app.route("/upload-video", methods=["POST"])
+def process_video_endpoint():
     try:
-        # Check if a file was uploaded
-        if 'video' not in request.files:
-            return jsonify({'error': 'No video file provided'}), 400
-        
-        file = request.files['video']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        if not allowed_file(file.filename):
-            return jsonify({'error': 'File type not allowed. Please upload a video file.'}), 400
-        
-        # Generate unique filename
-        original_filename = secure_filename(file.filename)
-        file_extension = original_filename.rsplit('.', 1)[1].lower()
-        unique_filename = f"{uuid.uuid4()}.{file_extension}"
-        temp_filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-        
-        # Save the uploaded file
-        file.save(temp_filepath)
-        file_size = os.path.getsize(temp_filepath)
-        
-        # Get video information
-        video_info = get_video_info(temp_filepath)
-        
-        # Process the video (generate preview)
-        processed_filename = f"processed_{unique_filename}"
-        processed_filepath = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
-        
-        processing_success = process_video_preview(temp_filepath, processed_filepath)
-        
-        # Prepare response data
-        response_data = {
-            'message': 'Video uploaded and processed successfully',
-            'original_filename': original_filename,
-            'temp_filename': unique_filename,
-            'temp_path': temp_filepath,
-            'file_size': f"{file_size / (1024*1024):.2f} MB",
-            'upload_time': datetime.now().isoformat(),
-            'video_info': video_info,
-            'preview_data': {
-                'processing_applied': 'Frame numbering and 10-second preview',
-                'original_duration': video_info['duration'] if video_info else 'Unknown',
-                'preview_duration': min(10, video_info['duration']) if video_info else 'Unknown'
-            }
-        }
-        
-        # Add processed video URL if processing was successful
-        if processing_success:
-            response_data['processed_video_url'] = f'/download-processed/{processed_filename}'
-        else:
-            response_data['processing_error'] = 'Failed to process video, but original uploaded successfully'
-        
-        return jsonify(response_data), 200
-    
-    except Exception as e:
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
+        if "video" not in request.files:
+            return jsonify({"error": "No video file provided"}), 400
 
-@app.route('/download-processed/<filename>')
+        video_file = request.files["video"]
+        if video_file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
+        if not allowed_file(video_file.filename):
+            return (
+                jsonify({"error": "Unsupported format. Use a standard video file."}),
+                400,
+            )
+
+        options = _parse_options_payload()
+
+        original_name = secure_filename(video_file.filename)
+        extension = original_name.rsplit(".", 1)[1].lower()
+        job_id = uuid.uuid4().hex
+
+        input_name = f"input_{job_id}.{extension}"
+        output_name = f"censored_{job_id}.mp4"
+        input_path = os.path.join(UPLOAD_FOLDER, input_name)
+        output_path = os.path.join(PROCESSED_FOLDER, output_name)
+
+        video_file.save(input_path)
+        trusted_paths = _save_trusted_faces(job_id)
+
+        job_manager.create(
+            job_id, message="Upload complete, waiting for available worker"
+        )
+        job_manager.submit(
+            _run_processing_job,
+            job_id,
+            input_path,
+            output_path,
+            original_name,
+            output_name,
+            options,
+            trusted_paths,
+        )
+
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "message": "Video accepted for async processing",
+                    "status_url": f"/jobs/{job_id}",
+                }
+            ),
+            202,
+        )
+    except ValueError as ex:
+        return jsonify({"error": str(ex)}), 400
+    except Exception as ex:
+        return jsonify({"error": f"Processing failed: {ex}"}), 500
+
+
+@app.route("/face-candidates", methods=["POST"])
+def face_candidates_endpoint():
+    try:
+        if "video" not in request.files:
+            return jsonify({"error": "No video file provided"}), 400
+
+        video_file = request.files["video"]
+        if video_file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
+        if not allowed_file(video_file.filename):
+            return (
+                jsonify({"error": "Unsupported format. Use a standard video file."}),
+                400,
+            )
+
+        temp_name = f"facescan_{uuid.uuid4().hex}.{secure_filename(video_file.filename).rsplit('.', 1)[1].lower()}"
+        temp_path = os.path.join(UPLOAD_FOLDER, temp_name)
+        video_file.save(temp_path)
+
+        try:
+            max_candidates = int(request.form.get("max_candidates", 12))
+            sample_stride = int(request.form.get("sample_stride", 6))
+            candidates = extract_face_candidates(
+                temp_path,
+                max_candidates=max(3, min(24, max_candidates)),
+                sample_stride=max(1, min(24, sample_stride)),
+            )
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return jsonify({"candidates": candidates, "count": len(candidates)}), 200
+    except Exception as ex:
+        return jsonify({"error": f"Face detection failed: {ex}"}), 500
+
+
+@app.route("/jobs/<job_id>", methods=["GET"])
+def get_job_status(job_id):
+    job = job_manager.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    response = {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "phase": job["phase"],
+        "progress": job["progress"],
+        "message": job.get("message"),
+        "error": job.get("error"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "finished_at": job.get("finished_at"),
+    }
+    if job.get("status") == "completed":
+        response["result"] = job.get("result")
+
+    return jsonify(response)
+
+
+@app.route("/download-processed/<filename>", methods=["GET"])
 def download_processed_video(filename):
-    """Download processed video file"""
     try:
-        return send_from_directory(app.config['PROCESSED_FOLDER'], filename, as_attachment=True)
+        return send_from_directory(PROCESSED_FOLDER, filename, as_attachment=True)
     except FileNotFoundError:
-        return jsonify({'error': 'Processed file not found'}), 404
+        return jsonify({"error": "Processed file not found"}), 404
 
-@app.route('/stream-processed/<filename>')
+
+@app.route("/stream-processed/<filename>", methods=["GET"])
 def stream_processed_video(filename):
-    """Stream processed video file for preview"""
-    try:
-        file_path = os.path.join(app.config['PROCESSED_FOLDER'], filename)
-        if not os.path.exists(file_path):
-            return jsonify({'error': 'File not found'}), 404
-        
-        # Set appropriate MIME type
-        mimetype = mimetypes.guess_type(file_path)[0] or 'video/mp4'
-        return send_file(file_path, mimetype=mimetype)
-    except Exception as e:
-        return jsonify({'error': f'Error streaming file: {str(e)}'}), 500
+    file_path = os.path.join(PROCESSED_FOLDER, filename)
+    if not os.path.exists(file_path):
+        return jsonify({"error": "File not found"}), 404
+    response = send_file(file_path, mimetype="video/mp4", conditional=True)
+    response.headers["Accept-Ranges"] = "bytes"
+    return response
 
-@app.route('/list-temp-files', methods=['GET'])
+
+@app.route("/list-temp-files", methods=["GET"])
 def list_temp_files():
-    """List all files in temporary storage"""
-    try:
-        files = []
-        for folder_name, folder_path in [('uploads', UPLOAD_FOLDER), ('processed', PROCESSED_FOLDER)]:
-            for filename in os.listdir(folder_path):
-                filepath = os.path.join(folder_path, filename)
-                if os.path.isfile(filepath):
-                    stat = os.stat(filepath)
-                    files.append({
-                        'filename': filename,
-                        'folder': folder_name,
-                        'size': f"{stat.st_size / (1024*1024):.2f} MB",
-                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        'age_hours': round((datetime.now() - datetime.fromtimestamp(stat.st_mtime)).total_seconds() / 3600, 2)
-                    })
-        
-        return jsonify({
-            'temp_files': files,
-            'total_files': len(files),
-            'cleanup_interval_hours': TEMP_FILE_EXPIRY_HOURS
-        }), 200
-    except Exception as e:
-        return jsonify({'error': f'Error listing files: {str(e)}'}), 500
+    files = []
+    for group, folder in [("uploads", UPLOAD_FOLDER), ("processed", PROCESSED_FOLDER)]:
+        for name in os.listdir(folder):
+            path = os.path.join(folder, name)
+            if os.path.isdir(path):
+                continue
+            stat = os.stat(path)
+            files.append(
+                {
+                    "filename": name,
+                    "group": group,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                }
+            )
+    return jsonify({"files": files, "count": len(files)})
 
-@app.route('/cleanup', methods=['POST'])
-def manual_cleanup():
-    """Manually trigger cleanup of expired files"""
-    try:
-        files_before = len(os.listdir(UPLOAD_FOLDER)) + len(os.listdir(PROCESSED_FOLDER))
-        cleanup_temp_files()
-        files_after = len(os.listdir(UPLOAD_FOLDER)) + len(os.listdir(PROCESSED_FOLDER))
-        files_deleted = files_before - files_after
-        
-        return jsonify({
-            'message': 'Cleanup completed',
-            'files_deleted': files_deleted,
-            'files_remaining': files_after
-        }), 200
-    except Exception as e:
-        return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
+
+@app.route("/cleanup", methods=["POST"])
+def cleanup_now():
+    before = len(os.listdir(UPLOAD_FOLDER)) + len(os.listdir(PROCESSED_FOLDER))
+    cleanup_expired_files([UPLOAD_FOLDER, PROCESSED_FOLDER], TEMP_FILE_EXPIRY_HOURS)
+    after = len(os.listdir(UPLOAD_FOLDER)) + len(os.listdir(PROCESSED_FOLDER))
+    return jsonify(
+        {"message": "Cleanup completed", "deleted": before - after, "remaining": after}
+    )
+
 
 @app.errorhandler(413)
-def file_too_large(error):
-    return jsonify({'error': 'File too large. Maximum size is 100MB'}), 413
+def too_large(_error):
+    return jsonify({"error": "File too large. Max size is 200MB."}), 413
+
 
 @app.errorhandler(404)
-def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
+def not_found(_error):
+    return jsonify({"error": "Endpoint not found"}), 404
 
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
 
-if __name__ == '__main__':
-    print("Starting Video Upload Backend Server...")
+if __name__ == "__main__":
+    print("Starting Context-Aware Video Censor Backend...")
     print(f"Upload folder: {os.path.abspath(UPLOAD_FOLDER)}")
     print(f"Processed folder: {os.path.abspath(PROCESSED_FOLDER)}")
-    print(f"Max file size: {MAX_FILE_SIZE / (1024*1024):.0f}MB")
-    print(f"Supported formats: {', '.join(ALLOWED_EXTENSIONS)}")
+    print(f"Max file size: {MAX_FILE_SIZE / (1024 * 1024):.0f}MB")
     print("Starting cleanup scheduler...")
-    
-    # Start cleanup scheduler
-    start_cleanup_scheduler()
-    
-    # Run the Flask app
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    _start_cleanup_scheduler()
+    app.run(debug=True, host="0.0.0.0", port=5000)

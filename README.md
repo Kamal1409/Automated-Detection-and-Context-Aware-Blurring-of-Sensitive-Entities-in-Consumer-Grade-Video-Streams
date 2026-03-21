@@ -1,216 +1,125 @@
-# Video Upload & Preview System
-H
-A full-stack application for uploading videos, generating previews, and storing them temporarily.
+# Context-Aware Video Censor Lab
 
-## Features
+A full-stack app where users upload a video and apply configurable privacy policies:
 
-- **Frontend (React)**:
-  - Drag and drop video upload
-  - Video preview before processing
-  - Upload progress tracking
-  - File validation and error handling
-  - Responsive design
-  
-- **Backend (Flask)**:
-  - Video file upload with validation
-  - Temporary storage with automatic cleanup
-  - Video processing (preview generation)
-  - RESTful API endpoints
-  - File streaming and download
+- Identity-aware face blurring (keep streamer/associates visible)
+- Background face blurring
+- Sensitive text-like region blurring
+- Nudity detection and blur (NudeNet)
+- Audio muting during sensitive events
 
-## Setup Instructions
+## Novel Processing Approach
 
-### Backend Setup
+This project uses a hybrid strategy called **Context Graph Censor v1**:
 
-1. Navigate to the backend directory:
-   ```bash
-   cd backend
-   ```
+1. Face detections are linked into lightweight tracks over time.
+2. Tracks are scored by persistence, center-priority, and scene presence.
+3. Trusted identities are preserved using reference-face similarity.
+4. Face decisions are temporally smoothed to reduce blur flicker frame-to-frame.
+5. Sensitive modalities (visual + audio) are censored selectively, not globally.
 
-2. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   ```
+## Project Structure
 
-3. Activate the virtual environment:
-   ```bash
-   # Windows
-   venv\Scripts\activate
-   # Linux/Mac
-   source venv/bin/activate
-   ```
+- `backend/app.py`: Flask API endpoints and upload orchestration
+- `backend/video_processing.py`: core censoring pipeline
+- `backend/settings.py`: central configuration and default options
+- `backend/options.py`: option normalization/validation
+- `backend/media_utils.py`: reusable media/file helper utilities
+- `backend/job_manager.py`: async queue/job state management
+- `frontend/home.jsx`: main React UI
+- `frontend/src/index.css`: visual design and responsive styles
 
-4. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Engineering Principles Applied
 
-5. Start the backend server:
-   ```bash
-   python app.py
-   ```
+- **Single Responsibility (SOLID)**: each backend module has one clear concern (config, validation, media utilities, job orchestration, API wiring, processing engine).
+- **Open/Closed (SOLID)**: new processing options can be introduced in `settings.py` + `options.py` with minimal route-layer changes.
+- **KISS**: the backend API remains thin and explicit; complex concerns are delegated to dedicated modules.
+- **YAGNI**: avoided adding unnecessary infrastructure (database, distributed queues) while keeping interfaces ready for future extension.
+- **Readability/Modularity**: functions are small, named by intent, and grouped by domain responsibility.
 
-The backend server will start on `http://localhost:5000`
+## Prerequisites
 
-### Frontend Setup
+1. Python 3.10+
+2. Node.js 18+
+3. FFmpeg installed and available on PATH (recommended for audio preserve/censor)
 
-1. Navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
+## Backend Setup
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+cd backend
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python app.py
+```
 
-3. Start the development server:
-   ```bash
-   npm start
-   ```
+Backend runs on: `http://localhost:5000`
 
-The frontend will be available at `http://localhost:3000`
+## Frontend Setup
 
-## API Endpoints
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-### POST /upload-video
-Upload and process a video file.
+Frontend runs on: `http://localhost:3000`
 
-**Request:**
-- Content-Type: multipart/form-data
-- Body: video file in 'video' field
+## One-Click Scripts
 
-**Response:**
+From repository root:
+
+- `start_backend.bat`
+- `start_frontend.bat`
+
+## API
+
+### `POST /process-video`
+Multipart form:
+
+- `video`: uploaded video file
+- `options`: JSON string of options
+- `trusted_faces`: optional multiple image files (face references)
+
+This endpoint is asynchronous and returns `202 Accepted` with a job id.
+
+Sample options payload:
+
 ```json
 {
-  "message": "Video uploaded and processed successfully",
-  "original_filename": "example.mp4",
-  "temp_filename": "uuid.mp4",
-  "temp_path": "/path/to/temp/file",
-  "file_size": "10.5 MB",
-  "upload_time": "2026-01-09T...",
-  "video_info": {
-    "width": 1920,
-    "height": 1080,
-    "fps": 30,
-    "duration": 120.5,
-    "frame_count": 3615
-  },
-  "processed_video_url": "/download-processed/processed_uuid.mp4",
-  "preview_data": {
-    "processing_applied": "Frame numbering and 10-second preview",
-    "original_duration": 120.5,
-    "preview_duration": 10
-  }
+  "blur_faces": true,
+  "blur_background_faces": true,
+  "preserve_primary_subjects": true,
+  "primary_subject_count": 1,
+  "blur_sensitive_text": false,
+  "detect_nudity": true,
+  "censor_sensitive_audio": true,
+  "keep_audio": true,
+  "trusted_face_threshold": 0.82,
+  "nudity_threshold": 0.55,
+  "nudity_sample_stride": 5,
+  "temporal_smoothing_alpha": 0.7,
+  "temporal_blur_threshold": 0.5
 }
 ```
 
-### GET /download-processed/<filename>
-Download a processed video file.
+Queue response includes:
 
-### GET /stream-processed/<filename>
-Stream a processed video file for preview.
+- `job_id`
+- `status` (queued)
+- `status_url` (poll endpoint)
 
-### GET /list-temp-files
-List all temporary files with metadata.
+### `GET /jobs/<job_id>`
+Poll this endpoint until status is `completed` or `failed`.
 
-### POST /cleanup
-Manually trigger cleanup of expired files.
+Completed response includes:
 
-### GET /health
-Health check endpoint.
+- `processed_video_url`
+- `download_video_url`
+- `report` with blur counts, muted intervals, and processing metadata
 
-## Configuration
+## Notes
 
-### Backend Configuration
-- **MAX_FILE_SIZE**: 100MB (configurable in app.py)
-- **ALLOWED_EXTENSIONS**: mp4, avi, mov, wmv, flv, webm, mkv
-- **TEMP_FILE_EXPIRY_HOURS**: 24 hours (files auto-deleted)
-- **Upload Directory**: `temp_storage/`
-- **Processed Directory**: `processed_videos/`
-
-### Frontend Configuration
-- **BACKEND_URL**: `http://localhost:5000` (configurable in home.jsx)
-- **Supported File Types**: Video files only
-- **Max Upload Size**: 100MB
-
-## File Structure
-
-```
-SDP/
-├── backend/
-│   ├── app.py                 # Main Flask application
-│   ├── tests.py              # Unit tests
-│   ├── requirements.txt      # Python dependencies
-│   ├── temp_storage/         # Uploaded videos (auto-created)
-│   └── processed_videos/     # Processed videos (auto-created)
-├── frontend/
-│   ├── public/
-│   │   └── index.html
-│   ├── src/
-│   │   ├── index.js          # React entry point
-│   │   ├── index.css         # Styles
-│   │   └── home.jsx          # Main component
-│   └── package.json          # Node dependencies
-└── README.md
-```
-
-## Video Processing
-
-The current implementation includes a sample video processing pipeline that:
-
-1. Extracts video metadata (resolution, fps, duration)
-2. Creates a 10-second preview with frame numbering
-3. Stores both original and processed videos temporarily
-
-**To customize processing:**
-Modify the `process_video_preview()` function in `app.py` to implement your specific video processing requirements.
-
-## Testing
-
-Run backend tests:
-```bash
-cd backend
-python tests.py
-```
-
-## Security Considerations
-
-- File type validation
-- File size limits
-- Secure filename generation
-- Automatic cleanup of temporary files
-- CORS enabled for development (configure for production)
-
-## Production Deployment
-
-For production deployment:
-
-1. Set `app.run(debug=False)` in app.py
-2. Configure proper CORS origins
-3. Use a production WSGI server (e.g., Gunicorn)
-4. Set up proper file storage (cloud storage recommended)
-5. Implement authentication if required
-6. Configure HTTPS
-
-## Troubleshooting
-
-### Common Issues
-
-1. **OpenCV Installation Issues**:
-   ```bash
-   pip install opencv-python-headless
-   ```
-
-2. **FFmpeg Not Found**:
-   - Install FFmpeg system-wide
-   - Or use: `pip install imageio-ffmpeg`
-
-3. **CORS Issues**:
-   - Ensure backend is running on correct port
-   - Check BACKEND_URL in frontend configuration
-
-4. **File Upload Issues**:
-   - Check file size (max 100MB)
-   - Verify file format is supported
-   - Ensure backend server is running
+- If FFmpeg is missing, output video is still produced, but audio may be dropped.
+- Nudity model files are downloaded by NudeNet on first usage.
+- Current face identity matching is lightweight (fast and practical), not face-recognition-grade biometrics.

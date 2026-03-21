@@ -4,3 +4,6 @@ werkzeug
 opencv-python
 pillow
 ffmpeg-python
+numpy
+nudenet
+imageio-ffmpeg
