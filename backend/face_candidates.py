@@ -64,6 +64,13 @@ def _face_quality(crop, box, frame_shape):
         1.0,
         center_dist / (math.hypot(frame_shape[1] * 0.5, frame_shape[0] * 0.5) + 1e-6),
     )
+    center_dist = math.hypot(
+        (x + w * 0.5) - (frame_shape[1] * 0.5), (y + h * 0.5) - (frame_shape[0] * 0.5)
+    )
+    center_score = 1.0 - min(
+        1.0,
+        center_dist / (math.hypot(frame_shape[1] * 0.5, frame_shape[0] * 0.5) + 1e-6),
+    )
     size_score = min(1.0, area_ratio / 0.06)
 
     return (0.55 * size_score) + (0.3 * sharp_score) + (0.15 * center_score)
@@ -103,8 +110,17 @@ def _detect_faces_multi(detector_frontal, detector_profile, gray):
     profile_left = detector_profile.detectMultiScale(
         gray, scaleFactor=1.08, minNeighbors=4, minSize=(28, 28)
     )
+    frontal = detector_frontal.detectMultiScale(
+        gray, scaleFactor=1.08, minNeighbors=5, minSize=(28, 28)
+    )
+    profile_left = detector_profile.detectMultiScale(
+        gray, scaleFactor=1.08, minNeighbors=4, minSize=(28, 28)
+    )
 
     flipped = cv2.flip(gray, 1)
+    profile_right_raw = detector_profile.detectMultiScale(
+        flipped, scaleFactor=1.08, minNeighbors=4, minSize=(28, 28)
+    )
     profile_right_raw = detector_profile.detectMultiScale(
         flipped, scaleFactor=1.08, minNeighbors=4, minSize=(28, 28)
     )
@@ -218,8 +234,7 @@ def extract_face_candidates(
                 ):
                     track["signature"] = 0.85 * track["signature"] + 0.15 * signature
                 else:
-                    # Keep the signature type stable; avoid mixing vector and dict representations.
-                    pass
+                    track["signature"] = 0.85 * track["signature"] + 0.15 * signature
             else:
                 tracks[next_id] = {
                     "id": next_id,
