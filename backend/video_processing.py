@@ -35,6 +35,12 @@ def _face_signature(frame, box):
 
 
 def _cosine_similarity(vec_a, vec_b):
+    if vec_a is None or vec_b is None:
+        return 0.0
+    if not isinstance(vec_a, np.ndarray) or not isinstance(vec_b, np.ndarray):
+        return 0.0
+    if vec_a.shape != vec_b.shape:
+        return 0.0
     return float(
         np.dot(vec_a, vec_b) / ((np.linalg.norm(vec_a) * np.linalg.norm(vec_b)) + 1e-8)
     )
@@ -131,6 +137,44 @@ def _merge_intervals(intervals, max_gap=0.4):
         else:
             merged.append([start, end])
     return [(round(s, 2), round(e, 2)) for s, e in merged]
+
+
+def _detect_nudity_scaled(nudity_detector, frame, max_side=768):
+    height, width = frame.shape[:2]
+    longest = max(width, height)
+    scale = 1.0
+    infer_frame = frame
+
+    if longest > max_side:
+        scale = float(max_side) / float(longest)
+        infer_frame = cv2.resize(
+            frame,
+            (int(width * scale), int(height * scale)),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+    try:
+        hits = nudity_detector.detect(infer_frame)
+    except Exception:
+        return []
+
+    if scale == 1.0:
+        return hits
+
+    inv = 1.0 / scale
+    scaled_hits = []
+    for hit in hits:
+        box = hit.get("box", [0, 0, 0, 0])
+        x, y, w, h = box
+        adjusted = dict(hit)
+        adjusted["box"] = [
+            int(x * inv),
+            int(y * inv),
+            int(w * inv),
+            int(h * inv),
+        ]
+        scaled_hits.append(adjusted)
+    return scaled_hits
 
 
 def _resolve_ffmpeg_command():
@@ -318,6 +362,22 @@ def process_video(
     smoothing_threshold = float(options.get("temporal_blur_threshold", 0.5))
     face_blur_strength = float(options.get("blur_strength_face", 1.2))
     nudity_blur_strength = float(options.get("blur_strength_nudity", 1.55))
+    track_max_missed = int(options.get("track_max_missed_frames", 12))
+    ghost_blur_frames = int(options.get("ghost_blur_frames", 4))
+    has_reference_faces = len(reference_signatures) > 0
+    prefer_trusted_only = bool(options.get("prefer_trusted_faces_only", True))
+    trusted_threshold = float(options.get("trusted_face_threshold", 0.82))
+    configured_stride = int(options.get("face_detect_stride", 0))
+    if configured_stride <= 0:
+        if face_engine.device == "cuda":
+            face_detect_stride = 1
+        elif face_engine.device == "directml":
+            # DirectML is GPU-backed but usually slower than CUDA for this workload.
+            face_detect_stride = 2
+        else:
+            face_detect_stride = 3
+    else:
+        face_detect_stride = max(1, min(6, configured_stride))
 
     if progress_callback:
         progress_callback(3.0, "Running frame analysis", "processing")
@@ -327,55 +387,79 @@ def process_video(
         if not ok:
             break
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        detections = face_detector.detectMultiScale(
-            gray, scaleFactor=1.08, minNeighbors=5, minSize=(30, 30)
-        )
+        for track in tracks.values():
+            track["missed"] = track.get("missed", 0) + 1
 
         current = []
-        for box in detections:
-            box = tuple(map(int, box))
-            best_track = None
-            best_iou = 0.0
+        should_detect = (frame_index % face_detect_stride == 0) or (len(tracks) == 0)
+        if should_detect:
+            detections = face_engine.detect_faces(frame)
+
+            for detection in detections:
+                box = tuple(map(int, detection["box"]))
+                best_track = None
+                best_score = -1.0
+                for track_id, track in tracks.items():
+                    if track.get("missed", 0) > track_max_missed:
+                        continue
+                    iou = _iou(box, track["box"])
+                    center_ratio = _center_distance_ratio(
+                        box, track["box"], width, height
+                    )
+                    score = iou + (0.35 * max(0.0, 1.0 - (center_ratio * 4.0)))
+                    if score > best_score:
+                        best_score = score
+                        best_track = track_id
+
+                if best_track is not None and best_score >= 0.22:
+                    track_id = best_track
+                else:
+                    track_id = next_track_id
+                    next_track_id += 1
+                    tracks[track_id] = {
+                        "box": box,
+                        "seen": 0,
+                        "center_score": 0.0,
+                        "area_score": 0.0,
+                        "signature": None,
+                        "blur_score": 1.0,
+                        "missed": 0,
+                        "trust_score": 0.0,
+                        "trusted_locked": False,
+                        "last_similarity": 0.0,
+                    }
+
+                x, y, w, h = box
+                center_x = x + w * 0.5
+                center_y = y + h * 0.5
+                center_dist = math.hypot(
+                    center_x - width * 0.5, center_y - height * 0.5
+                )
+                normalized_center = 1.0 - min(
+                    1.0,
+                    center_dist / (math.hypot(width * 0.5, height * 0.5) + 1e-6),
+                )
+
+                track = tracks[track_id]
+                track["box"] = box
+                track["seen"] += 1
+                track["center_score"] += normalized_center
+                track["area_score"] += (w * h) / float(width * height)
+                track["missed"] = 0
+
+                sig = _face_signature(frame, box)
+                if detection.get("embedding") is not None:
+                    sig = detection.get("embedding")
+                if sig is not None:
+                    track["signature"] = sig
+
+                current.append((track_id, box))
+        else:
+            # Reuse recent boxes between heavyweight detection frames to keep blur stable and reduce latency.
             for track_id, track in tracks.items():
-                score = _iou(box, track["box"])
-                if score > best_iou:
-                    best_iou = score
-                    best_track = track_id
-
-            if best_track is not None and best_iou > 0.3:
-                track_id = best_track
-            else:
-                track_id = next_track_id
-                next_track_id += 1
-                tracks[track_id] = {
-                    "box": box,
-                    "seen": 0,
-                    "center_score": 0.0,
-                    "area_score": 0.0,
-                    "signature": None,
-                    "blur_score": 1.0,
-                }
-
-            x, y, w, h = box
-            center_x = x + w * 0.5
-            center_y = y + h * 0.5
-            center_dist = math.hypot(center_x - width * 0.5, center_y - height * 0.5)
-            normalized_center = 1.0 - min(
-                1.0, center_dist / (math.hypot(width * 0.5, height * 0.5) + 1e-6)
-            )
-
-            track = tracks[track_id]
-            track["box"] = box
-            track["seen"] += 1
-            track["center_score"] += normalized_center
-            track["area_score"] += (w * h) / float(width * height)
-
-            sig = _face_signature(frame, box)
-            if sig is not None:
-                track["signature"] = sig
-
-            current.append((track_id, box))
+                if int(track.get("missed", 0)) <= 1:
+                    track["missed"] = 0
+                    current.append((track_id, track["box"]))
 
         ranked_tracks = sorted(
             tracks.items(),
@@ -386,6 +470,9 @@ def process_video(
         )
         top_k = max(1, int(options.get("primary_subject_count", 1)))
         primary_ids = {track_id for track_id, _ in ranked_tracks[:top_k]}
+        allow_primary_preserve = bool(
+            options.get("preserve_primary_subjects", True)
+        ) and not (has_reference_faces and prefer_trusted_only)
 
         for track_id, box in current:
             blur_this_face = options.get("blur_faces", True)
@@ -396,30 +483,48 @@ def process_video(
                 similarities = [
                     _cosine_similarity(signature, ref) for ref in reference_signatures
                 ]
-                trusted = max(similarities) >= float(
-                    options.get("trusted_face_threshold", 0.82)
+                best_similarity = max(similarities)
+                track["last_similarity"] = best_similarity
+                track["trust_score"] = (0.88 * float(track.get("trust_score", 0.0))) + (
+                    0.12 * best_similarity
                 )
+                if (
+                    best_similarity >= trusted_threshold + 0.04
+                    or track["trust_score"] >= trusted_threshold + 0.03
+                ):
+                    track["trusted_locked"] = True
+            else:
+                track["trust_score"] = 0.995 * float(track.get("trust_score", 0.0))
+
+            if track.get("trusted_locked", False) and track.get("seen", 0) > 20:
+                if float(track.get("trust_score", 0.0)) < trusted_threshold - 0.1:
+                    track["trusted_locked"] = False
+
+            trusted = bool(track.get("trusted_locked", False)) or float(
+                track.get("trust_score", 0.0)
+            ) >= (trusted_threshold + 0.02)
 
             if trusted:
                 blur_this_face = False
-            elif (
-                options.get("preserve_primary_subjects", True)
-                and track_id in primary_ids
-            ):
+            elif allow_primary_preserve and track_id in primary_ids:
                 blur_this_face = False
             elif options.get("blur_background_faces", True):
                 blur_this_face = True
             else:
                 blur_this_face = options.get("blur_faces", True)
 
-            previous = float(
-                tracks[track_id].get("blur_score", 1.0 if blur_this_face else 0.0)
-            )
-            current_vote = 1.0 if blur_this_face else 0.0
-            smoothed = (smoothing_alpha * previous) + (
-                (1.0 - smoothing_alpha) * current_vote
-            )
-            tracks[track_id]["blur_score"] = smoothed
+            if trusted:
+                smoothed = 0.0
+                track["blur_score"] = 0.0
+            else:
+                previous = float(
+                    track.get("blur_score", 1.0 if blur_this_face else 0.0)
+                )
+                current_vote = 1.0 if blur_this_face else 0.0
+                smoothed = (smoothing_alpha * previous) + (
+                    (1.0 - smoothing_alpha) * current_vote
+                )
+                track["blur_score"] = smoothed
 
             if smoothed >= smoothing_threshold:
                 _blur_region(frame, box, strength=face_blur_strength)
@@ -437,7 +542,7 @@ def process_video(
         if nudity_detector is not None:
             if frame_index % int(options.get("nudity_sample_stride", 5)) == 0:
                 try:
-                    nudity_hits = nudity_detector.detect(frame)
+                    nudity_hits = _detect_nudity_scaled(nudity_detector, frame)
                 except Exception:
                     nudity_hits = []
 
@@ -534,5 +639,11 @@ def process_video(
         "engine": {
             "name": "Context Graph Censor v1",
             "description": "Identity-aware face trust + scene-priority tracks + temporal smoothing + selective modality censoring",
+            "face_backend": face_engine.backend,
+            "face_device": face_engine.device,
+            "face_providers": list(getattr(face_engine, "providers", [])),
+            "face_detect_stride": int(face_detect_stride),
+            "gpu_requested": bool(options.get("use_gpu", True)),
+            "gpu_active": bool(face_engine.device in {"cuda", "directml"}),
         },
     }

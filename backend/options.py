@@ -52,5 +52,8 @@ def normalize_options(raw_options):
     options["temporal_blur_threshold"] = max(
         0.2, min(0.95, float(options.get("temporal_blur_threshold", 0.5)))
     )
+    options["face_detect_stride"] = max(
+        0, min(6, int(options.get("face_detect_stride", 0)))
+    )
 
     return options

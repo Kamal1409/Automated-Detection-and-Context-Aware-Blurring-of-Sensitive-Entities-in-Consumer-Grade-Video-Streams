@@ -28,6 +28,7 @@ DEFAULT_OPTIONS = {
     "blur_strength_nudity": 1.55,
     "temporal_smoothing_alpha": 0.7,
     "temporal_blur_threshold": 0.5,
+    "face_detect_stride": 0,
 }
 
 

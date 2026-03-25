@@ -215,12 +215,16 @@ def face_candidates_endpoint():
         video_file.save(temp_path)
 
         try:
-            max_candidates = int(request.form.get("max_candidates", 12))
-            sample_stride = int(request.form.get("sample_stride", 6))
+            max_candidates = int(request.form.get("max_candidates", 18))
+            sample_stride = int(request.form.get("sample_stride", 2))
+            max_seconds = int(request.form.get("max_seconds", 180))
+            prefer_gpu = _parse_bool(request.form.get("prefer_gpu"), default=True)
             candidates = extract_face_candidates(
                 temp_path,
                 max_candidates=max(3, min(24, max_candidates)),
                 sample_stride=max(1, min(24, sample_stride)),
+                max_seconds=max(10, min(600, max_seconds)),
+                prefer_gpu=prefer_gpu,
             )
         finally:
             if os.path.exists(temp_path):
@@ -319,4 +323,10 @@ if __name__ == "__main__":
     print(f"Max file size: {MAX_FILE_SIZE / (1024 * 1024):.0f}MB")
     print("Starting cleanup scheduler...")
     _start_cleanup_scheduler()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    debug_mode = str(os.getenv("FLASK_DEBUG", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    app.run(debug=debug_mode, host="0.0.0.0", port=5000, use_reloader=debug_mode)
