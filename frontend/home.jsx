@@ -27,10 +27,7 @@ const initialOptions = {
 
 function Home() {
     const fileInputRef = useRef(null);
-    const trustedFacesRef = useRef(null);
-
     const [videoFile, setVideoFile] = useState(null);
-    const [trustedFaces, setTrustedFaces] = useState([]);
     const [candidateFaces, setCandidateFaces] = useState([]);
     const [detectingFaces, setDetectingFaces] = useState(false);
     const [dragOver, setDragOver] = useState(false);
@@ -66,12 +63,6 @@ function Home() {
         event.preventDefault();
         setDragOver(false);
         onFileSelected(event.dataTransfer.files?.[0]);
-    };
-
-    const handleTrustedFaces = (event) => {
-        const files = Array.from(event.target.files || []);
-        const images = files.filter((file) => file.type.startsWith('image/'));
-        setTrustedFaces(images);
     };
 
     const setOption = (key, value) => {
@@ -180,7 +171,6 @@ function Home() {
         const formData = new FormData();
         formData.append('video', videoFile);
         formData.append('options', JSON.stringify(options));
-        trustedFaces.forEach((file) => formData.append('trusted_faces', file));
 
         const selectedCandidates = candidateFaces.filter((face) => face.selected);
         for (const face of selectedCandidates) {
@@ -226,11 +216,11 @@ function Home() {
 
             <main className="layout">
                 <section className="hero card">
-                    <p className="eyebrow">Context-Aware Censor Lab</p>
-                    <h1>Upload once. Censor with identity-aware control.</h1>
+                    <p className="eyebrow">Selective Blur Studio</p>
+                    <h1>Blur everything except the faces you approve.</h1>
                     <p className="hero-copy">
-                        Protect privacy while preserving approved identities like streamer + associates.
-                        Configure face, text, nudity, and audio behavior in one pass.
+                        Upload an MP4, scan face clusters from the video, and export a full-FPS
+                        result with explicit content and unapproved faces blurred.
                     </p>
                 </section>
 
@@ -253,7 +243,7 @@ function Home() {
                             <p className="dropzone-title">
                                 {videoFile ? videoFile.name : 'Drop video here or click to choose'}
                             </p>
-                            <p className="dropzone-sub">MP4, MOV, AVI, WEBM, MKV</p>
+                            <p className="dropzone-sub">MP4 recommended. Full-FPS output preserved.</p>
                             <input
                                 ref={fileInputRef}
                                 className="hidden"
@@ -275,46 +265,26 @@ function Home() {
                     </div>
 
                     <div>
-                        <h2>2) Trusted People</h2>
+                        <h2>2) Allowed Faces (from video)</h2>
                         <p className="help-text">
-                            Upload face reference images of people that should stay uncensored.
+                            Scan the video for face clusters, then click the faces you want to keep.
+                            Everything else will be blurred by default.
                         </p>
-                        <button className="ghost-btn" onClick={() => trustedFacesRef.current?.click()}>
-                            Add Trusted Faces
-                        </button>
-                        <input
-                            ref={trustedFacesRef}
-                            className="hidden"
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            onChange={handleTrustedFaces}
-                        />
-
-                        <div className="trusted-list">
-                            {trustedFaces.length === 0 && <p className="muted">No trusted face images selected.</p>}
-                            {trustedFaces.map((file) => (
-                                <div key={`${file.name}-${file.size}`} className="trusted-item">
-                                    <span>{file.name}</span>
-                                </div>
-                            ))}
-                        </div>
-
                         <div className="candidate-actions">
                             <button className="ghost-btn" onClick={detectCandidateFaces} disabled={!videoFile || detectingFaces}>
-                                {detectingFaces ? 'Detecting Faces...' : 'Detect Faces From Video'}
+                                {detectingFaces ? 'Scanning Frames...' : 'Scan Face Clusters'}
                             </button>
                             <button className="ghost-btn" onClick={() => selectAllCandidates(true)} disabled={candidateFaces.length === 0}>
-                                Select All
+                                Keep All
                             </button>
                             <button className="ghost-btn" onClick={() => selectAllCandidates(false)} disabled={candidateFaces.length === 0}>
-                                Unselect All
+                                Keep None
                             </button>
                         </div>
 
                         {candidateFaces.length > 0 && (
                             <div className="candidate-grid">
-                                {candidateFaces.map((face) => (
+                                {candidateFaces.map((face, index) => (
                                     <button
                                         type="button"
                                         key={face.candidate_id}
@@ -322,7 +292,7 @@ function Home() {
                                         onClick={() => toggleCandidateFace(face.candidate_id)}
                                     >
                                         <img src={face.image_data_url} alt={face.candidate_id} />
-                                        <span>{face.candidate_id} ({face.frames_seen})</span>
+                                        <span>Cluster {index + 1} · {face.frames_seen} frames</span>
                                     </button>
                                 ))}
                             </div>
@@ -339,7 +309,7 @@ function Home() {
                                 checked={options.blur_faces}
                                 onChange={(e) => setOption('blur_faces', e.target.checked)}
                             />
-                            <span>Blur faces</span>
+                            <span>Blur all faces except allowed clusters</span>
                         </label>
 
                         <label className="toggle">
@@ -348,7 +318,7 @@ function Home() {
                                 checked={options.blur_background_faces}
                                 onChange={(e) => setOption('blur_background_faces', e.target.checked)}
                             />
-                            <span>Blur background faces aggressively</span>
+                            <span>Aggressive blur for small/far faces</span>
                         </label>
 
                         <label className="toggle">
@@ -357,7 +327,7 @@ function Home() {
                                 checked={options.preserve_primary_subjects}
                                 onChange={(e) => setOption('preserve_primary_subjects', e.target.checked)}
                             />
-                            <span>Preserve primary subjects (auto)</span>
+                            <span>Fallback: auto-keep top faces if none selected</span>
                         </label>
 
                         <label className="toggle">
@@ -366,7 +336,7 @@ function Home() {
                                 checked={options.blur_sensitive_text}
                                 onChange={(e) => setOption('blur_sensitive_text', e.target.checked)}
                             />
-                            <span>Blur text overlays/subtitles</span>
+                            <span>Blur text overlays/subtitles (optional)</span>
                         </label>
 
                         <label className="toggle">
@@ -375,7 +345,7 @@ function Home() {
                                 checked={options.detect_nudity}
                                 onChange={(e) => setOption('detect_nudity', e.target.checked)}
                             />
-                            <span>Detect and blur nudity</span>
+                            <span>Detect and blur explicit content (strict)</span>
                         </label>
 
                         <label className="toggle">
@@ -384,7 +354,7 @@ function Home() {
                                 checked={options.censor_sensitive_audio}
                                 onChange={(e) => setOption('censor_sensitive_audio', e.target.checked)}
                             />
-                            <span>Mute audio during sensitive events</span>
+                            <span>Mute audio during explicit events</span>
                         </label>
 
                         <label className="toggle">
@@ -393,13 +363,13 @@ function Home() {
                                 checked={options.keep_audio}
                                 onChange={(e) => setOption('keep_audio', e.target.checked)}
                             />
-                            <span>Keep original audio track</span>
+                            <span>Keep original audio track (passthrough)</span>
                         </label>
                     </div>
 
                     <div className="sliders">
                         <label>
-                            Primary subjects kept: <strong>{options.primary_subject_count}</strong>
+                            Auto-keep faces (fallback): <strong>{options.primary_subject_count}</strong>
                             <input
                                 type="range"
                                 min="1"
@@ -410,7 +380,7 @@ function Home() {
                         </label>
 
                         <label>
-                            Trusted face match threshold: <strong>{options.trusted_face_threshold.toFixed(2)}</strong>
+                            Face match threshold: <strong>{options.trusted_face_threshold.toFixed(2)}</strong>
                             <input
                                 type="range"
                                 min="0.5"
@@ -422,7 +392,7 @@ function Home() {
                         </label>
 
                         <label>
-                            Nudity confidence threshold: <strong>{options.nudity_threshold.toFixed(2)}</strong>
+                            Explicit confidence threshold: <strong>{options.nudity_threshold.toFixed(2)}</strong>
                             <input
                                 type="range"
                                 min="0.3"
@@ -434,12 +404,12 @@ function Home() {
                         </label>
 
                         <label>
-                            Nudity policy mode
+                            Explicit policy mode
                             <select
                                 value={options.nudity_policy_mode}
                                 onChange={(e) => setOption('nudity_policy_mode', e.target.value)}
                             >
-                                <option value="porn_only">Porn-Only (strictest)</option>
+                                <option value="porn_only">Strictest (adult-only)</option>
                                 <option value="balanced">Balanced</option>
                                 <option value="streaming_strict">Streaming-Strict (recommended)</option>
                             </select>
@@ -524,7 +494,7 @@ function Home() {
                             <div className="stat"><span>Faces blurred</span><strong>{result.report?.faces_blurred ?? 0}</strong></div>
                             <div className="stat"><span>Faces preserved</span><strong>{result.report?.faces_preserved ?? 0}</strong></div>
                             <div className="stat"><span>Text regions blurred</span><strong>{result.report?.text_regions_blurred ?? 0}</strong></div>
-                            <div className="stat"><span>Nudity regions blurred</span><strong>{result.report?.nudity_regions_blurred ?? 0}</strong></div>
+                            <div className="stat"><span>Explicit regions blurred</span><strong>{result.report?.nudity_regions_blurred ?? 0}</strong></div>
                             <div className="stat"><span>Trusted refs used</span><strong>{result.report?.trusted_reference_faces ?? 0}</strong></div>
                             <div className="stat"><span>Audio mute intervals</span><strong>{result.report?.audio_censored_intervals?.length ?? 0}</strong></div>
                         </div>

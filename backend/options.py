@@ -12,6 +12,14 @@ def normalize_options(raw_options):
     )
     options["blur_sensitive_text"] = bool(options.get("blur_sensitive_text", False))
     options["detect_nudity"] = bool(options.get("detect_nudity", True))
+    explicit_backend = str(options.get("explicit_backend", "auto")).strip().lower()
+    if explicit_backend not in {"auto", "falconai", "yolo", "nudenet"}:
+        explicit_backend = "auto"
+    options["explicit_backend"] = explicit_backend
+    options["explicit_model_path"] = str(options.get("explicit_model_path", "")).strip()
+    options["explicit_classifier_model"] = str(
+        options.get("explicit_classifier_model", "")
+    ).strip()
     mode = str(options.get("nudity_policy_mode", "streaming_strict")).strip().lower()
     if mode not in {"porn_only", "balanced", "streaming_strict"}:
         mode = "streaming_strict"
@@ -39,7 +47,76 @@ def normalize_options(raw_options):
     options["nudity_consecutive_hits"] = max(
         1, min(6, int(options.get("nudity_consecutive_hits", 2)))
     )
+    options["explicit_classifier_threshold"] = max(
+        0.05,
+        min(
+            0.99,
+            float(
+                options.get(
+                    "explicit_classifier_threshold",
+                    options.get("nudity_threshold", 0.55),
+                )
+            ),
+        ),
+    )
+    options["explicit_sample_stride"] = max(
+        1,
+        min(
+            24,
+            int(
+                options.get(
+                    "explicit_sample_stride", options.get("nudity_sample_stride", 5)
+                )
+            ),
+        ),
+    )
+    options["explicit_consecutive_hits"] = max(
+        1,
+        min(
+            6,
+            int(
+                options.get(
+                    "explicit_consecutive_hits",
+                    options.get("nudity_consecutive_hits", 2),
+                )
+            ),
+        ),
+    )
+    options["explicit_hold_frames"] = max(
+        0, min(12, int(options.get("explicit_hold_frames", 3)))
+    )
+    options["explicit_pose_model_path"] = str(
+        options.get("explicit_pose_model_path", "")
+    ).strip()
+    options["explicit_pose_confidence"] = max(
+        0.1, min(0.95, float(options.get("explicit_pose_confidence", 0.25)))
+    )
+    options["explicit_pose_iou"] = max(
+        0.1, min(0.95, float(options.get("explicit_pose_iou", 0.45)))
+    )
+    options["explicit_pose_imgsz"] = max(
+        320, min(1280, int(options.get("explicit_pose_imgsz", 640)))
+    )
+    options["explicit_keypoint_confidence"] = max(
+        0.1, min(0.95, float(options.get("explicit_keypoint_confidence", 0.3)))
+    )
     options["nudity_strict_labels"] = bool(options.get("nudity_strict_labels", True))
+    face_backend = str(options.get("face_backend", "auto")).strip().lower()
+    if face_backend not in {"auto", "yolo", "insightface"}:
+        face_backend = "auto"
+    options["face_backend"] = face_backend
+    options["face_model_path"] = str(options.get("face_model_path", "")).strip()
+    options["explicit_iou"] = max(
+        0.1, min(0.95, float(options.get("explicit_iou", 0.45)))
+    )
+    options["explicit_imgsz"] = max(
+        320, min(1280, int(options.get("explicit_imgsz", 640)))
+    )
+    options["face_confidence"] = max(
+        0.1, min(0.95, float(options.get("face_confidence", 0.25)))
+    )
+    options["face_iou"] = max(0.1, min(0.95, float(options.get("face_iou", 0.5))))
+    options["face_imgsz"] = max(320, min(1280, int(options.get("face_imgsz", 640))))
     options["blur_strength_face"] = max(
         0.6, min(2.5, float(options.get("blur_strength_face", 1.2)))
     )

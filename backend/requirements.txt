@@ -10,3 +10,7 @@ easyocr
 numpy
 nudenet
 imageio-ffmpeg
+ultralytics
+transformers
+torch
+torchvision

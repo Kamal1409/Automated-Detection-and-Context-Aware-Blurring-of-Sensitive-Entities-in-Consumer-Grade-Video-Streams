@@ -8,6 +8,17 @@ from datetime import datetime
 import cv2
 import numpy as np
 
+from face_engine import get_face_engine
+from nsfw_classifier import get_nsfw_classifier, predict_nsfw_score
+from pose_detector import PoseDetector
+from settings import (
+    DEFAULT_EXPLICIT_CLASSIFIER_MODEL,
+    DEFAULT_EXPLICIT_MODEL_PATH,
+    DEFAULT_EXPLICIT_POSE_MODEL_PATH,
+    DEFAULT_FACE_MODEL_PATH,
+)
+from yolo_detector import YoloDetector
+
 try:
     import imageio_ffmpeg
 except Exception:
@@ -73,6 +84,75 @@ def _blur_region(frame, box, strength=1.0):
     kx = max(15, int(base_kx * strength) | 1)
     ky = max(15, int(base_ky * strength) | 1)
     frame[y : y + h, x : x + w] = cv2.GaussianBlur(roi, (kx, ky), 0)
+
+
+def _clip_box(x1, y1, x2, y2, width, height):
+    x1 = max(0, min(width - 1, int(x1)))
+    y1 = max(0, min(height - 1, int(y1)))
+    x2 = max(0, min(width - 1, int(x2)))
+    y2 = max(0, min(height - 1, int(y2)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2 - x1, y2 - y1
+
+
+def _pose_boxes_from_detection(
+    person_box, keypoints, keypoint_scores, frame_shape, keypoint_conf=0.3
+):
+    height, width = frame_shape[:2]
+    x, y, w, h = person_box
+
+    def _valid_point(idx):
+        if keypoints is None:
+            return None
+        if keypoint_scores is not None and keypoint_scores[idx] < keypoint_conf:
+            return None
+        px, py = keypoints[idx]
+        if px <= 0 or py <= 0:
+            return None
+        return px, py
+
+    shoulders = list(filter(None, [_valid_point(5), _valid_point(6)]))
+    hips = list(filter(None, [_valid_point(11), _valid_point(12)]))
+    knees = list(filter(None, [_valid_point(13), _valid_point(14)]))
+
+    boxes = []
+
+    if shoulders and hips:
+        shoulder_x = [p[0] for p in shoulders]
+        shoulder_y = [p[1] for p in shoulders]
+        hip_y = [p[1] for p in hips]
+        hip_x = [p[0] for p in hips]
+
+        top_y = min(shoulder_y) - 0.08 * h
+        mid_y = min(hip_y)
+        chest_bottom = top_y + 0.6 * max(10.0, mid_y - top_y)
+        chest_x1 = min(shoulder_x + hip_x) - 0.12 * w
+        chest_x2 = max(shoulder_x + hip_x) + 0.12 * w
+        chest_box = _clip_box(chest_x1, top_y, chest_x2, chest_bottom, width, height)
+        if chest_box is not None:
+            boxes.append(chest_box)
+
+        knee_y = min([p[1] for p in knees]) if knees else y + 0.85 * h
+        pelvis_x1 = min(hip_x) - 0.12 * w
+        pelvis_x2 = max(hip_x) + 0.12 * w
+        pelvis_y1 = min(hip_y) - 0.05 * h
+        pelvis_y2 = knee_y
+        pelvis_box = _clip_box(
+            pelvis_x1, pelvis_y1, pelvis_x2, pelvis_y2, width, height
+        )
+        if pelvis_box is not None:
+            boxes.append(pelvis_box)
+
+    if not boxes:
+        chest_box = _clip_box(x, y, x + w, y + 0.35 * h, width, height)
+        pelvis_box = _clip_box(x, y + 0.45 * h, x + w, y + 0.85 * h, width, height)
+        if chest_box is not None:
+            boxes.append(chest_box)
+        if pelvis_box is not None:
+            boxes.append(pelvis_box)
+
+    return boxes
 
 
 STRICT_NUDITY_LABELS = {
@@ -286,7 +366,9 @@ def _mux_audio(
     return True, "Web-compatible video generated with audio policy applied."
 
 
-def _load_reference_signatures(face_detector, trusted_face_paths):
+def _load_reference_signatures(
+    face_engine, trusted_face_paths, signature_mode="embedding"
+):
     signatures = []
     for path in trusted_face_paths:
         image = cv2.imread(path)
@@ -300,8 +382,15 @@ def _load_reference_signatures(face_detector, trusted_face_paths):
         if len(faces) == 0:
             continue
 
-        faces = sorted(faces, key=lambda box: box[2] * box[3], reverse=True)
-        sig = _face_signature(image, tuple(map(int, faces[0])))
+        faces = sorted(
+            faces,
+            key=lambda face: face["box"][2] * face["box"][3],
+            reverse=True,
+        )
+        if signature_mode == "fallback":
+            sig = _face_signature(image, faces[0]["box"])
+        else:
+            sig = faces[0].get("embedding")
         if sig is not None:
             signatures.append(sig)
     return signatures
@@ -314,9 +403,89 @@ def process_video(
     if progress_callback:
         progress_callback(0.0, "Initializing detectors", "initializing")
 
-    face_detector = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    use_gpu = bool(options.get("use_gpu", True))
+    device = 0 if use_gpu else "cpu"
+    face_engine = get_face_engine(prefer_gpu=use_gpu)
+
+    face_backend = str(options.get("face_backend", "auto")).strip().lower()
+    face_model_path = options.get("face_model_path") or DEFAULT_FACE_MODEL_PATH
+    face_detector = None
+    use_face_yolo = False
+    if face_backend in {"auto", "yolo"}:
+        face_detector = YoloDetector(
+            face_model_path,
+            device=device,
+            conf=float(options.get("face_confidence", 0.25)),
+            iou=float(options.get("face_iou", 0.5)),
+            imgsz=int(options.get("face_imgsz", 640)),
+        )
+        use_face_yolo = bool(face_detector.available)
+    if face_backend == "yolo" and not use_face_yolo:
+        face_backend = "insightface"
+
+    explicit_backend = str(options.get("explicit_backend", "auto")).strip().lower()
+    explicit_model_path = (
+        options.get("explicit_model_path") or DEFAULT_EXPLICIT_MODEL_PATH
     )
+    explicit_classifier_model = (
+        options.get("explicit_classifier_model") or DEFAULT_EXPLICIT_CLASSIFIER_MODEL
+    )
+    explicit_pose_model_path = (
+        options.get("explicit_pose_model_path") or DEFAULT_EXPLICIT_POSE_MODEL_PATH
+    )
+    explicit_classifier_threshold = float(
+        options.get(
+            "explicit_classifier_threshold", options.get("nudity_threshold", 0.55)
+        )
+    )
+    explicit_sample_stride = int(
+        options.get("explicit_sample_stride", options.get("nudity_sample_stride", 5))
+    )
+    explicit_consecutive_hits = int(
+        options.get(
+            "explicit_consecutive_hits", options.get("nudity_consecutive_hits", 2)
+        )
+    )
+    explicit_hold_frames = int(options.get("explicit_hold_frames", 3))
+    explicit_keypoint_conf = float(options.get("explicit_keypoint_confidence", 0.3))
+    explicit_classifier = None
+    use_falconai = False
+    if options.get("detect_nudity", False) and explicit_backend in {"auto", "falconai"}:
+        explicit_classifier = get_nsfw_classifier(
+            explicit_classifier_model,
+            device=0 if use_gpu else -1,
+        )
+        use_falconai = explicit_classifier is not None
+    if use_falconai:
+        explicit_backend = "falconai"
+    if explicit_backend == "falconai" and not use_falconai:
+        explicit_backend = "yolo"
+
+    explicit_detector = None
+    use_explicit_yolo = False
+    if options.get("detect_nudity", False) and explicit_backend in {"auto", "yolo"}:
+        explicit_detector = YoloDetector(
+            explicit_model_path,
+            device=device,
+            conf=float(options.get("nudity_threshold", 0.55)),
+            iou=float(options.get("explicit_iou", 0.45)),
+            imgsz=int(options.get("explicit_imgsz", 640)),
+        )
+        use_explicit_yolo = bool(explicit_detector.available)
+    if explicit_backend == "yolo" and not use_explicit_yolo:
+        explicit_backend = "nudenet"
+
+    pose_detector = None
+    use_pose = False
+    if options.get("detect_nudity", False) and explicit_backend == "falconai":
+        pose_detector = PoseDetector(
+            explicit_pose_model_path,
+            device=device,
+            conf=float(options.get("explicit_pose_confidence", 0.25)),
+            iou=float(options.get("explicit_pose_iou", 0.45)),
+            imgsz=int(options.get("explicit_pose_imgsz", 640)),
+        )
+        use_pose = bool(pose_detector.available)
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise RuntimeError("Could not open input video.")
@@ -338,10 +507,18 @@ def process_video(
         (width, height),
     )
 
-    reference_signatures = _load_reference_signatures(face_detector, trusted_face_paths)
+    signature_mode = "fallback" if use_face_yolo else "embedding"
+    reference_signatures = _load_reference_signatures(
+        face_engine, trusted_face_paths, signature_mode=signature_mode
+    )
 
     nudity_detector = None
-    if options.get("detect_nudity", False) and NudeDetector is not None:
+    if (
+        options.get("detect_nudity", False)
+        and not use_falconai
+        and not use_explicit_yolo
+        and NudeDetector is not None
+    ):
         try:
             nudity_detector = NudeDetector()
         except Exception:
@@ -358,6 +535,11 @@ def process_video(
     nudity_raw_hits = 0
     nudity_filtered_hits = 0
     nudity_positive_streak = 0
+    explicit_positive_streak = 0
+    explicit_hold_remaining = 0
+    explicit_boxes_cache = []
+    explicit_frames_flagged = 0
+    explicit_scores = []
     smoothing_alpha = float(options.get("temporal_smoothing_alpha", 0.7))
     smoothing_threshold = float(options.get("temporal_blur_threshold", 0.5))
     face_blur_strength = float(options.get("blur_strength_face", 1.2))
@@ -393,7 +575,18 @@ def process_video(
         current = []
         should_detect = (frame_index % face_detect_stride == 0) or (len(tracks) == 0)
         if should_detect:
-            detections = face_engine.detect_faces(frame)
+            if use_face_yolo and face_detector is not None:
+                yolo_faces = face_detector.detect(frame)
+                detections = [
+                    {
+                        "box": item["box"],
+                        "score": float(item.get("score", 0.0)),
+                        "embedding": None,
+                    }
+                    for item in yolo_faces
+                ]
+            else:
+                detections = face_engine.detect_faces(frame)
 
             for detection in detections:
                 box = tuple(map(int, detection["box"]))
@@ -539,7 +732,81 @@ def process_video(
                 blurred_text_regions += 1
 
         frame_has_sensitive = False
-        if nudity_detector is not None:
+        if use_falconai and explicit_classifier is not None:
+            if frame_index % max(1, explicit_sample_stride) == 0:
+                nsfw_score, _label = predict_nsfw_score(frame, explicit_classifier)
+                explicit_scores.append(float(nsfw_score))
+
+                if nsfw_score >= explicit_classifier_threshold:
+                    explicit_positive_streak += 1
+                else:
+                    explicit_positive_streak = 0
+
+                if explicit_positive_streak >= max(1, explicit_consecutive_hits):
+                    explicit_hold_remaining = max(0, explicit_hold_frames)
+                    if use_pose and pose_detector is not None:
+                        pose_detections = pose_detector.detect(frame)
+                        explicit_boxes = []
+                        for person in pose_detections:
+                            explicit_boxes.extend(
+                                _pose_boxes_from_detection(
+                                    person["box"],
+                                    person.get("keypoints"),
+                                    person.get("keypoint_scores"),
+                                    frame.shape,
+                                    keypoint_conf=explicit_keypoint_conf,
+                                )
+                            )
+                        explicit_boxes_cache = explicit_boxes
+                    else:
+                        explicit_boxes_cache = []
+
+            if explicit_hold_remaining > 0:
+                if explicit_boxes_cache:
+                    for region in explicit_boxes_cache:
+                        _blur_region(frame, region, strength=nudity_blur_strength)
+                        blurred_nudity_regions += 1
+                explicit_hold_remaining -= 1
+                explicit_frames_flagged += 1
+                frame_has_sensitive = True
+
+        elif use_explicit_yolo and explicit_detector is not None:
+            if frame_index % int(options.get("nudity_sample_stride", 5)) == 0:
+                threshold = float(options.get("nudity_threshold", 0.55))
+                min_relative_area = float(options.get("nudity_min_relative_area", 0.01))
+                min_consecutive_hits = int(options.get("nudity_consecutive_hits", 2))
+
+                detections = explicit_detector.detect(
+                    frame,
+                    conf=threshold,
+                    iou=float(options.get("explicit_iou", 0.45)),
+                    imgsz=int(options.get("explicit_imgsz", 640)),
+                )
+
+                filtered_boxes = []
+                for hit in detections:
+                    nudity_raw_hits += 1
+                    if float(hit.get("score", 0.0)) < threshold:
+                        continue
+                    x, y, w, h = hit.get("box", (0, 0, 0, 0))
+                    area_ratio = (w * h) / float(width * height)
+                    if area_ratio < min_relative_area:
+                        continue
+                    filtered_boxes.append((x, y, w, h))
+
+                if filtered_boxes:
+                    nudity_positive_streak += 1
+                else:
+                    nudity_positive_streak = 0
+
+                if nudity_positive_streak >= min_consecutive_hits:
+                    for nudity_box in filtered_boxes:
+                        _blur_region(frame, nudity_box, strength=nudity_blur_strength)
+                        blurred_nudity_regions += 1
+                        nudity_filtered_hits += 1
+                        frame_has_sensitive = True
+
+        elif nudity_detector is not None:
             if frame_index % int(options.get("nudity_sample_stride", 5)) == 0:
                 try:
                     nudity_hits = _detect_nudity_scaled(nudity_detector, frame)
@@ -631,6 +898,8 @@ def process_video(
         "nudity_regions_blurred": int(blurred_nudity_regions),
         "nudity_raw_hits": int(nudity_raw_hits),
         "nudity_filtered_hits": int(nudity_filtered_hits),
+        "explicit_frames_flagged": int(explicit_frames_flagged),
+        "explicit_classifier_scores": explicit_scores[-50:],
         "audio_censored_intervals": mute_intervals,
         "audio_processing": {
             "success": bool(audio_ok),
@@ -639,11 +908,20 @@ def process_video(
         "engine": {
             "name": "Context Graph Censor v1",
             "description": "Identity-aware face trust + scene-priority tracks + temporal smoothing + selective modality censoring",
-            "face_backend": face_engine.backend,
+            "face_backend": "yolo" if use_face_yolo else face_engine.backend,
             "face_device": face_engine.device,
             "face_providers": list(getattr(face_engine, "providers", [])),
             "face_detect_stride": int(face_detect_stride),
             "gpu_requested": bool(options.get("use_gpu", True)),
             "gpu_active": bool(face_engine.device in {"cuda", "directml"}),
+            "explicit_backend": (
+                "falconai"
+                if use_falconai
+                else ("yolo" if use_explicit_yolo else "nudenet")
+            ),
+            "explicit_model_path": explicit_model_path if use_explicit_yolo else None,
+            "explicit_classifier_model": (
+                explicit_classifier_model if use_falconai else None
+            ),
         },
     }

@@ -1,0 +1,25 @@
+stages:
+  train_faces:
+    cmd: python training/train_faces.py --params params.yaml
+    deps:
+      - training/train_faces.py
+      - training/faces/data.yaml
+      - params.yaml
+    params:
+      - params.yaml:
+          - training.faces
+          - artifacts.faces
+    outs:
+      - training/artifacts/faces
+  train_explicit:
+    cmd: python training/train_explicit.py --params params.yaml
+    deps:
+      - training/train_explicit.py
+      - training/explicit/data.yaml
+      - params.yaml
+    params:
+      - params.yaml:
+          - training.explicit
+          - artifacts.explicit
+    outs:
+      - training/artifacts/explicit

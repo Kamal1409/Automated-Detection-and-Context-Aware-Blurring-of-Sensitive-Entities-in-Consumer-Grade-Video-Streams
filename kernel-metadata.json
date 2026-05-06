@@ -1,0 +1,15 @@
+{
+  "id": "aadityartrivedi/sdp-yolo-v8",
+  "title": "sdp-yolo-v8",
+  "code_file": "training/train_faces.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": ["mksaad/wider-face-a-face-detection-benchmark"],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

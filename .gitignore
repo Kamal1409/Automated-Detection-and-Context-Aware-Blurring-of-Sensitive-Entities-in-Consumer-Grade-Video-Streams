@@ -164,6 +164,14 @@ temp_storage/
 processed_videos/
 uploads/
 
+# Model weights
+backend/models/**/*.pt
+
+# Training data and runs
+training/**/dataset/
+training/runs/
+training/artifacts/
+
 # Node.js dependencies
 node_modules/
 npm-debug.log*
@@ -197,3 +205,4 @@ Thumbs.db
 *.webm
 *.mkv
 ./venv
+training/data
