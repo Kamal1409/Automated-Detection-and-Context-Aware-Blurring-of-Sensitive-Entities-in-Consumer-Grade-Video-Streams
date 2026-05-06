@@ -1,7 +1,11 @@
+import os
 from ultralytics import YOLO
 import cv2
 import numpy as np
 import easyocr
+
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_YOLO_MODEL_PATH = "results/runs/spixgro_face_detector/weights/best.pt"
 class VIDEO:
     def __init__(self, gpu=False, use_yolo=True):
         print(f"[DEBUG-OCR] Initializing OCR Processor with gpu={gpu}, use_yolo={use_yolo}")
@@ -26,7 +30,7 @@ class VIDEO:
         if use_yolo:
             print(f"[DEBUG-OCR] Attempting to load YOLO models")
             try:
-                self.smart_model = YOLO(r"yolov8n.pt")
+                self.smart_model = YOLO(_YOLO_MODEL_PATH)
                 if self.gpu_enabled:
                     self.smart_model.to('cuda')
                 print(f"[DEBUG-OCR] Successfully loaded primary YOLO model")
