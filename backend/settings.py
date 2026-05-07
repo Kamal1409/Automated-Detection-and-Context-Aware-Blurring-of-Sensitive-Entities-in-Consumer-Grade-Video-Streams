@@ -1,10 +1,26 @@
 import os
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
-DEFAULT_FACE_MODEL_PATH = os.getenv(
-    "FACE_MODEL_PATH", os.path.join(MODEL_DIR, "faces", "best.pt")
-)
+DEFAULT_FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH")
+if not DEFAULT_FACE_MODEL_PATH:
+    candidate_paths = [
+        os.path.join(PROJECT_ROOT, "results", "yolov8n.pt"),
+        os.path.join(PROJECT_ROOT, "results", "yolo26n.pt"),
+        os.path.join(MODEL_DIR, "faces", "best.pt"),
+    ]
+    DEFAULT_FACE_MODEL_PATH = next(
+        (path for path in candidate_paths if os.path.exists(path)),
+        candidate_paths[-1],
+    )
 DEFAULT_EXPLICIT_MODEL_PATH = os.getenv(
     "EXPLICIT_MODEL_PATH", os.path.join(MODEL_DIR, "explicit", "best.pt")
 )
@@ -28,9 +44,14 @@ DEFAULT_OPTIONS = {
     "blur_background_faces": True,
     "preserve_primary_subjects": True,
     "primary_subject_count": 1,
+    "subject_selection_mode": "heuristic",
+    "llm_decision_delay_seconds": 6.0,
+    "llm_min_track_seconds": 1.5,
+    "llm_max_tracks": 10,
+    "llm_context_hint": "",
     "blur_sensitive_text": False,
     "detect_nudity": True,
-    "explicit_backend": "falconai",
+    "explicit_backend": "nudenet",
     "explicit_model_path": "",
     "explicit_iou": 0.45,
     "explicit_imgsz": 640,

@@ -10,11 +10,19 @@ def normalize_options(raw_options):
     options["preserve_primary_subjects"] = bool(
         options.get("preserve_primary_subjects", True)
     )
+    subject_mode = (
+        str(options.get("subject_selection_mode", "heuristic")).strip().lower()
+    )
+    if subject_mode not in {"heuristic", "llm"}:
+        subject_mode = "heuristic"
+    options["subject_selection_mode"] = subject_mode
     options["blur_sensitive_text"] = bool(options.get("blur_sensitive_text", False))
     options["detect_nudity"] = bool(options.get("detect_nudity", True))
-    explicit_backend = str(options.get("explicit_backend", "auto")).strip().lower()
-    if explicit_backend not in {"auto", "falconai", "yolo", "nudenet"}:
-        explicit_backend = "auto"
+    explicit_backend = str(options.get("explicit_backend", "nudenet")).strip().lower()
+    if explicit_backend in {"auto", "falconai"}:
+        explicit_backend = "nudenet"
+    if explicit_backend not in {"yolo", "nudenet"}:
+        explicit_backend = "nudenet"
     options["explicit_backend"] = explicit_backend
     options["explicit_model_path"] = str(options.get("explicit_model_path", "")).strip()
     options["explicit_classifier_model"] = str(
@@ -32,6 +40,14 @@ def normalize_options(raw_options):
     options["primary_subject_count"] = max(
         1, min(5, int(options.get("primary_subject_count", 1)))
     )
+    options["llm_decision_delay_seconds"] = max(
+        0.0, min(60.0, float(options.get("llm_decision_delay_seconds", 6.0)))
+    )
+    options["llm_min_track_seconds"] = max(
+        0.0, min(30.0, float(options.get("llm_min_track_seconds", 1.5)))
+    )
+    options["llm_max_tracks"] = max(3, min(30, int(options.get("llm_max_tracks", 10))))
+    options["llm_context_hint"] = str(options.get("llm_context_hint", "")).strip()
     options["trusted_face_threshold"] = max(
         0.4, min(0.98, float(options.get("trusted_face_threshold", 0.82)))
     )

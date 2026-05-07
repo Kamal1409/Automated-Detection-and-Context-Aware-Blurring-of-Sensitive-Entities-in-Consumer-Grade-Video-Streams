@@ -1,6 +1,7 @@
 flask
 flask-cors
 werkzeug
+python-dotenv
 opencv-python
 pillow
 ffmpeg-python

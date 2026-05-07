@@ -8,6 +8,11 @@ const initialOptions = {
     blur_background_faces: true,
     preserve_primary_subjects: true,
     primary_subject_count: 1,
+    subject_selection_mode: 'heuristic',
+    llm_decision_delay_seconds: 6,
+    llm_min_track_seconds: 1.5,
+    llm_max_tracks: 10,
+    llm_context_hint: '',
     blur_sensitive_text: false,
     detect_nudity: true,
     nudity_policy_mode: 'streaming_strict',
@@ -31,6 +36,7 @@ function Home() {
     const [candidateFaces, setCandidateFaces] = useState([]);
     const [detectingFaces, setDetectingFaces] = useState(false);
     const [dragOver, setDragOver] = useState(false);
+    const [selectionMode, setSelectionMode] = useState('manual');
 
     const [options, setOptions] = useState(initialOptions);
     const [uploadProgress, setUploadProgress] = useState(0);
@@ -69,12 +75,28 @@ function Home() {
         setOptions((prev) => ({ ...prev, [key]: value }));
     };
 
+    const updateSelectionMode = (mode) => {
+        setSelectionMode(mode);
+        setOptions((prev) => ({
+            ...prev,
+            subject_selection_mode: mode === 'automated' ? 'llm' : 'heuristic',
+            preserve_primary_subjects: mode === 'automated' ? true : prev.preserve_primary_subjects,
+        }));
+        if (mode === 'automated') {
+            setCandidateFaces([]);
+        }
+    };
+
     const dataUrlToBlob = async (dataUrl) => {
         const response = await fetch(dataUrl);
         return response.blob();
     };
 
     const detectCandidateFaces = async () => {
+        if (selectionMode !== 'manual') {
+            setError('Switch to manual mode to scan face clusters.');
+            return;
+        }
         if (!videoFile) {
             setError('Upload a video first.');
             return;
@@ -170,12 +192,21 @@ function Home() {
 
         const formData = new FormData();
         formData.append('video', videoFile);
-        formData.append('options', JSON.stringify(options));
+        const payloadOptions = {
+            ...options,
+            subject_selection_mode: selectionMode === 'automated' ? 'llm' : 'heuristic',
+        };
+        if (selectionMode === 'automated') {
+            payloadOptions.preserve_primary_subjects = true;
+        }
+        formData.append('options', JSON.stringify(payloadOptions));
 
-        const selectedCandidates = candidateFaces.filter((face) => face.selected);
-        for (const face of selectedCandidates) {
-            const blob = await dataUrlToBlob(face.image_data_url);
-            formData.append('trusted_faces', blob, `${face.candidate_id}.jpg`);
+        if (selectionMode === 'manual') {
+            const selectedCandidates = candidateFaces.filter((face) => face.selected);
+            for (const face of selectedCandidates) {
+                const blob = await dataUrlToBlob(face.image_data_url);
+                formData.append('trusted_faces', blob, `${face.candidate_id}.jpg`);
+            }
         }
 
         try {
@@ -265,37 +296,74 @@ function Home() {
                     </div>
 
                     <div>
-                        <h2>2) Allowed Faces (from video)</h2>
-                        <p className="help-text">
-                            Scan the video for face clusters, then click the faces you want to keep.
-                            Everything else will be blurred by default.
-                        </p>
-                        <div className="candidate-actions">
-                            <button className="ghost-btn" onClick={detectCandidateFaces} disabled={!videoFile || detectingFaces}>
-                                {detectingFaces ? 'Scanning Frames...' : 'Scan Face Clusters'}
+                        <h2>2) Subject Selection</h2>
+                        <div className="mode-toggle">
+                            <button
+                                type="button"
+                                className={`mode-pill ${selectionMode === 'manual' ? 'active' : ''}`}
+                                onClick={() => updateSelectionMode('manual')}
+                            >
+                                Manual selection
                             </button>
-                            <button className="ghost-btn" onClick={() => selectAllCandidates(true)} disabled={candidateFaces.length === 0}>
-                                Keep All
-                            </button>
-                            <button className="ghost-btn" onClick={() => selectAllCandidates(false)} disabled={candidateFaces.length === 0}>
-                                Keep None
+                            <button
+                                type="button"
+                                className={`mode-pill ${selectionMode === 'automated' ? 'active' : ''}`}
+                                onClick={() => updateSelectionMode('automated')}
+                            >
+                                Automated (LLM)
                             </button>
                         </div>
 
-                        {candidateFaces.length > 0 && (
-                            <div className="candidate-grid">
-                                {candidateFaces.map((face, index) => (
-                                    <button
-                                        type="button"
-                                        key={face.candidate_id}
-                                        className={`candidate-card ${face.selected ? 'selected' : ''}`}
-                                        onClick={() => toggleCandidateFace(face.candidate_id)}
-                                    >
-                                        <img src={face.image_data_url} alt={face.candidate_id} />
-                                        <span>Cluster {index + 1} · {face.frames_seen} frames</span>
+                        {selectionMode === 'manual' ? (
+                            <>
+                                <p className="help-text">
+                                    Scan the video for face clusters, then click the faces you want to keep.
+                                    Everything else will be blurred by default.
+                                </p>
+                                <div className="candidate-actions">
+                                    <button className="ghost-btn" onClick={detectCandidateFaces} disabled={!videoFile || detectingFaces}>
+                                        {detectingFaces ? 'Scanning Frames...' : 'Scan Face Clusters'}
                                     </button>
-                                ))}
-                            </div>
+                                    <button className="ghost-btn" onClick={() => selectAllCandidates(true)} disabled={candidateFaces.length === 0}>
+                                        Keep All
+                                    </button>
+                                    <button className="ghost-btn" onClick={() => selectAllCandidates(false)} disabled={candidateFaces.length === 0}>
+                                        Keep None
+                                    </button>
+                                </div>
+
+                                {candidateFaces.length > 0 && (
+                                    <div className="candidate-grid">
+                                        {candidateFaces.map((face, index) => (
+                                            <button
+                                                type="button"
+                                                key={face.candidate_id}
+                                                className={`candidate-card ${face.selected ? 'selected' : ''}`}
+                                                onClick={() => toggleCandidateFace(face.candidate_id)}
+                                            >
+                                                <img src={face.image_data_url} alt={face.candidate_id} />
+                                                <span>Cluster {index + 1} · {face.frames_seen} frames</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <>
+                                <p className="help-text">
+                                    The LLM will pick the primary subject(s) automatically and blur everyone else.
+                                    Use a short hint if the video needs extra context.
+                                </p>
+                                <label className="text-field">
+                                    <span>Context hint (optional)</span>
+                                    <input
+                                        type="text"
+                                        value={options.llm_context_hint}
+                                        placeholder="e.g., street interview with one host"
+                                        onChange={(e) => setOption('llm_context_hint', e.target.value)}
+                                    />
+                                </label>
+                            </>
                         )}
                     </div>
                 </section>
@@ -321,14 +389,16 @@ function Home() {
                             <span>Aggressive blur for small/far faces</span>
                         </label>
 
-                        <label className="toggle">
-                            <input
-                                type="checkbox"
-                                checked={options.preserve_primary_subjects}
-                                onChange={(e) => setOption('preserve_primary_subjects', e.target.checked)}
-                            />
-                            <span>Fallback: auto-keep top faces if none selected</span>
-                        </label>
+                        {selectionMode === 'manual' && (
+                            <label className="toggle">
+                                <input
+                                    type="checkbox"
+                                    checked={options.preserve_primary_subjects}
+                                    onChange={(e) => setOption('preserve_primary_subjects', e.target.checked)}
+                                />
+                                <span>Fallback: auto-keep top faces if none selected</span>
+                            </label>
+                        )}
 
                         <label className="toggle">
                             <input

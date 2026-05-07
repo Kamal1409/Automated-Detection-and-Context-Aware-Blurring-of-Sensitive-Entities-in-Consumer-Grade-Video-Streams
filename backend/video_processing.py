@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from face_engine import get_face_engine
+from llm_manager import LLM
 from nsfw_classifier import get_nsfw_classifier, predict_nsfw_score
 from pose_detector import PoseDetector
 from settings import (
@@ -217,6 +218,44 @@ def _merge_intervals(intervals, max_gap=0.4):
         else:
             merged.append([start, end])
     return [(round(s, 2), round(e, 2)) for s, e in merged]
+
+
+def _build_llm_track_summaries(tracks, fps, min_seconds, max_tracks):
+    summaries = []
+    if fps <= 0:
+        fps = 1.0
+
+    for track_id, track in tracks.items():
+        visible_frames = int(track.get("visible_frames", 0))
+        if visible_frames <= 0:
+            visible_frames = int(track.get("seen", 0))
+        visible_seconds = visible_frames / fps
+        if visible_seconds < min_seconds:
+            continue
+
+        seen = max(int(track.get("seen", 0)), 1)
+        summaries.append(
+            {
+                "track_id": int(track_id),
+                "visible_seconds": round(visible_seconds, 2),
+                "avg_center_score": round(
+                    float(track.get("center_score", 0.0)) / seen, 4
+                ),
+                "avg_area_ratio": round(float(track.get("area_score", 0.0)) / seen, 4),
+                "first_seen_s": round(float(track.get("first_seen_frame", 0)) / fps, 2),
+                "last_seen_s": round(float(track.get("last_seen_frame", 0)) / fps, 2),
+            }
+        )
+
+    summaries.sort(
+        key=lambda item: (
+            item["visible_seconds"],
+            item["avg_area_ratio"],
+            item["avg_center_score"],
+        ),
+        reverse=True,
+    )
+    return summaries[: max(1, int(max_tracks))]
 
 
 def _detect_nudity_scaled(nudity_detector, frame, max_side=768):
@@ -496,6 +535,32 @@ def process_video(
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = frame_count / fps if fps else 0
 
+    primary_subject_count = max(1, int(options.get("primary_subject_count", 1)))
+    subject_selection_mode = (
+        str(options.get("subject_selection_mode", "heuristic")).strip().lower()
+    )
+    llm_decision_delay = float(options.get("llm_decision_delay_seconds", 6.0))
+    llm_min_track_seconds = float(options.get("llm_min_track_seconds", 1.5))
+    llm_max_tracks = int(options.get("llm_max_tracks", 10))
+    llm_context_hint = str(options.get("llm_context_hint", "")).strip()
+    llm_client = LLM() if subject_selection_mode == "llm" else None
+    llm_selected_ids = None
+    llm_attempted = False
+    llm_meta = {
+        "enabled": bool(llm_client and llm_client.enabled),
+        "attempted": False,
+        "selected_ids": [],
+        "reason": None,
+        "confidence": None,
+        "error": None,
+    }
+    video_context = {
+        "duration_seconds": round(duration, 2),
+        "fps": round(fps, 2),
+        "resolution": {"width": width, "height": height},
+        "context_hint": llm_context_hint,
+    }
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="visual_censor_")
     temp_visual_path = os.path.join(temp_dir, "visual.mp4")
@@ -620,6 +685,9 @@ def process_video(
                         "trust_score": 0.0,
                         "trusted_locked": False,
                         "last_similarity": 0.0,
+                        "visible_frames": 0,
+                        "first_seen_frame": frame_index,
+                        "last_seen_frame": frame_index,
                     }
 
                 x, y, w, h = box
@@ -639,6 +707,7 @@ def process_video(
                 track["center_score"] += normalized_center
                 track["area_score"] += (w * h) / float(width * height)
                 track["missed"] = 0
+                track["last_seen_frame"] = frame_index
 
                 sig = _face_signature(frame, box)
                 if detection.get("embedding") is not None:
@@ -654,6 +723,13 @@ def process_video(
                     track["missed"] = 0
                     current.append((track_id, track["box"]))
 
+        for track_id, _box in current:
+            track = tracks.get(track_id)
+            if not track:
+                continue
+            track["visible_frames"] = int(track.get("visible_frames", 0)) + 1
+            track["last_seen_frame"] = frame_index
+
         ranked_tracks = sorted(
             tracks.items(),
             key=lambda item: (item[1]["seen"] * 1.5)
@@ -661,8 +737,40 @@ def process_video(
             + item[1]["area_score"] * 25,
             reverse=True,
         )
-        top_k = max(1, int(options.get("primary_subject_count", 1)))
-        primary_ids = {track_id for track_id, _ in ranked_tracks[:top_k]}
+
+        if subject_selection_mode == "llm" and not llm_attempted:
+            if fps > 0 and (frame_index / fps) >= llm_decision_delay:
+                summaries = _build_llm_track_summaries(
+                    tracks, fps, llm_min_track_seconds, llm_max_tracks
+                )
+                if summaries:
+                    llm_attempted = True
+                    llm_meta["attempted"] = True
+                    if llm_client:
+                        keep_ids, meta = llm_client.select_primary_tracks(
+                            video_context,
+                            summaries,
+                            primary_subject_count=primary_subject_count,
+                        )
+                        llm_meta["error"] = meta.get("error")
+                        llm_meta["reason"] = meta.get("reason")
+                        llm_meta["confidence"] = meta.get("confidence")
+                        if keep_ids:
+                            llm_selected_ids = set(keep_ids)
+                            llm_meta["selected_ids"] = list(keep_ids)
+                    else:
+                        llm_meta["error"] = "disabled"
+
+        heuristic_primary_ids = {
+            track_id for track_id, _ in ranked_tracks[:primary_subject_count]
+        }
+        primary_ids = heuristic_primary_ids
+        if llm_selected_ids:
+            active_llm_ids = {
+                track_id for track_id in llm_selected_ids if track_id in tracks
+            }
+            if active_llm_ids:
+                primary_ids = active_llm_ids
         allow_primary_preserve = bool(
             options.get("preserve_primary_subjects", True)
         ) and not (has_reference_faces and prefer_trusted_only)
@@ -904,6 +1012,11 @@ def process_video(
         "audio_processing": {
             "success": bool(audio_ok),
             "message": audio_message,
+        },
+        "subject_selection": {
+            "mode": subject_selection_mode,
+            "primary_subject_count": int(primary_subject_count),
+            "llm": llm_meta,
         },
         "engine": {
             "name": "Context Graph Censor v1",
