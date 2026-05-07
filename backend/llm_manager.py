@@ -66,7 +66,7 @@ class LLM:
                 if attempt >= self.max_retries:
                     raise RuntimeError(last_error) from ex
 
-            delay_seconds = min(8.0, 0.6 * (2 ** attempt))
+            delay_seconds = min(8.0, 0.6 * (2**attempt))
             time.sleep(delay_seconds)
 
         raise RuntimeError(last_error or "request_failed")
