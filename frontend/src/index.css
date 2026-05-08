@@ -381,7 +381,7 @@ select {
 }
 
 .error-box {
-    color: #ffd5db;
+    color: #8b1a25;
     border: 1px solid rgba(214, 69, 80, 0.45);
     background: rgba(214, 69, 80, 0.14);
 }

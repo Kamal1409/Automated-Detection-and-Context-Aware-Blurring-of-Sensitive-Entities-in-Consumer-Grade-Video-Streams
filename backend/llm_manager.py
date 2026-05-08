@@ -91,7 +91,7 @@ class LLM:
         system_prompt = (
             "You decide which people are the primary subjects of a video. "
             "Return JSON only with keys: keep_track_ids (list of ints), reason, confidence (0..1). "
-            "Choose subjects central to the story; blur bystanders/background extras."
+            "Detect all human faces in the video and keep only the primary subject’s face visible. Blur every other detected face throughout the entire video while maintaining smooth tracking across frames. The selected face should remain completely unblurred even when moving, turning, or partially occluded. Apply a strong Gaussian blur to all non-selected faces and ensure no flickering or missed frames occur."
         )
         user_prompt = "DATA:\n" + json.dumps(payload_data, ensure_ascii=True)
 

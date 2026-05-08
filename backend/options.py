@@ -19,9 +19,7 @@ def normalize_options(raw_options):
     options["blur_sensitive_text"] = bool(options.get("blur_sensitive_text", False))
     options["detect_nudity"] = bool(options.get("detect_nudity", True))
     explicit_backend = str(options.get("explicit_backend", "nudenet")).strip().lower()
-    if explicit_backend in {"auto", "falconai"}:
-        explicit_backend = "nudenet"
-    if explicit_backend not in {"yolo", "nudenet"}:
+    if explicit_backend not in {"auto", "yolo", "nudenet", "falconai"}:
         explicit_backend = "nudenet"
     options["explicit_backend"] = explicit_backend
     options["explicit_model_path"] = str(options.get("explicit_model_path", "")).strip()
