@@ -13,7 +13,7 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 DEFAULT_FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH")
 if not DEFAULT_FACE_MODEL_PATH:
     candidate_paths = [
-        os.path.join(PROJECT_ROOT, "results", "yolov8n.pt"),
+        os.path.join(PROJECT_ROOT, "results", "runs", "spixgro_face_detector", "weights", "best.pt"),
         os.path.join(PROJECT_ROOT, "results", "yolo26n.pt"),
         os.path.join(MODEL_DIR, "faces", "best.pt"),
     ]

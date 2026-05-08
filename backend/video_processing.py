@@ -751,6 +751,7 @@ def process_video(
                             video_context,
                             summaries,
                             primary_subject_count=primary_subject_count,
+                            user_prompt=options.get("user_prompt", options.get("llm_prompt", None))
                         )
                         llm_meta["error"] = meta.get("error")
                         llm_meta["reason"] = meta.get("reason")

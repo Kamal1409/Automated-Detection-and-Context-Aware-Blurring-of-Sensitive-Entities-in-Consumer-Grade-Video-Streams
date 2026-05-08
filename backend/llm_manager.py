@@ -72,7 +72,7 @@ class LLM:
         raise RuntimeError(last_error or "request_failed")
 
     def select_primary_tracks(
-        self, video_context, track_summaries, primary_subject_count=1
+        self, video_context, track_summaries, primary_subject_count=1, user_prompt=None
     ):
         meta = {"error": None, "reason": None, "confidence": None}
         if not self.enabled:
@@ -91,13 +91,19 @@ class LLM:
         system_prompt = (
             "You decide which people are the primary subjects of a video. "
             "Return JSON only with keys: keep_track_ids (list of ints), reason, confidence (0..1). "
-            "Detect all human faces in the video and keep only the primary subject’s face visible. Blur every other detected face throughout the entire video while maintaining smooth tracking across frames. The selected face should remain completely unblurred even when moving, turning, or partially occluded. Apply a strong Gaussian blur to all non-selected faces and ensure no flickering or missed frames occur."
         )
-        user_prompt = "DATA:\n" + json.dumps(payload_data, ensure_ascii=True)
+        if user_prompt:
+            system_prompt += str(user_prompt)
+        else:
+            system_prompt += (
+                "Detect all human faces in the video and keep only the primary subject’s face visible. Blur every other detected face throughout the entire video while maintaining smooth tracking across frames. The selected face should remain completely unblurred even when moving, turning, or partially occluded. Apply a strong Gaussian blur to all non-selected faces and ensure no flickering or missed frames occur."
+            )
+
+        data_prompt = "DATA:\n" + json.dumps(payload_data, ensure_ascii=True)
 
         request_payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "contents": [{"role": "user", "parts": [{"text": data_prompt}]}],
             "generationConfig": {
                 "temperature": 0.2,
                 "responseMimeType": "application/json",

@@ -269,8 +269,8 @@ def download_processed_video(filename):
 @app.route("/stream-processed/<filename>", methods=["GET"])
 def stream_processed_video(filename):
     file_path = os.path.abspath(
-    os.path.join(PROCESSED_FOLDER, "..", "..", filename)
-)
+        os.path.join(PROCESSED_FOLDER, filename)
+    )
     if not os.path.exists(file_path):
         return jsonify({"error": "File not found"}), 404
     response = send_file(file_path, mimetype="video/mp4", conditional=True)
